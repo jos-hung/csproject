@@ -1,44 +1,51 @@
-"""AI agent that processes natural language management commands via an LLM.
+"""Real AI agent that provides LLM-powered services for AgentManagementLayer.
 
-The QueryAgent sends user commands to an OpenAI-compatible chat model and
-expects a JSON response describing which management action to perform.  A
-configurable system prompt keeps the agent focused on the management domain.
+QueryAgent is injected into AgentManagementLayer and upgrades two steps:
+  - detect_intent  : uses an LLM to classify the user's intent instead of
+                     a simple keyword lookup.
+  - aggregate_results : uses an LLM to produce a natural-language summary
+                        of what the agents did, instead of a plain count.
+
+Usage
+-----
+    from query import QueryAgent
+    from management import AgentManagementLayer, AIAgent
+
+    qa = QueryAgent()          # reads OPENAI_API_KEY from the environment
+    manager = AgentManagementLayer(agents=[...], query_agent=qa)
+    result  = manager.handle_request(request)
 """
 
-import json
 import os
 from typing import Any, Dict, List, Optional
 
 from openai import OpenAI
 
 # ---------------------------------------------------------------------------
-# Prompt
+# Supported intents (must match AgentManagementLayer.plan_actions keys)
 # ---------------------------------------------------------------------------
 
-_SYSTEM_PROMPT = """
-You are an AI agent management assistant embedded in an AI management system.
-Your role is to interpret natural language commands and translate them into
-structured management actions for other AI agents.
+_VALID_INTENTS = {"data_collection", "simulation", "report_generation", "general_task"}
 
-Always respond with a valid JSON object that has the following fields:
-  - "action"     : one of create_agent | delete_agent | start_agent |
-                   stop_agent | list_agents | get_status | query_agent |
-                   unknown
-  - "parameters" : an object with action-specific fields (see below)
-  - "message"    : a concise human-readable description of what you will do
+# ---------------------------------------------------------------------------
+# System prompts
+# ---------------------------------------------------------------------------
 
-Parameter schemas per action
-─────────────────────────────
-create_agent  → { name, description?, type? }
-delete_agent  → { id? , name? }
-start_agent   → { id? , name? }
-stop_agent    → { id? , name? }
-get_status    → { id? , name? }
-list_agents   → {}
-query_agent   → { id? , name? , query }
-unknown       → {}
+_INTENT_SYSTEM_PROMPT = """
+You are an intent classifier for an AI agent management system.
+Classify the user's request into exactly one of the following intents:
+  - data_collection   : collecting data, recording, building a dataset
+  - simulation        : running simulations or virtual scenarios
+  - report_generation : generating reports or summaries from existing data
+  - general_task      : anything that does not fit the above categories
 
-Use "unknown" when the command does not map to any supported action.
+Respond with ONLY the intent label, nothing else.
+""".strip()
+
+_AGGREGATE_SYSTEM_PROMPT = """
+You are an assistant that summarises the results of a multi-agent workflow.
+Given a JSON list of task results, write a concise, friendly human-readable
+summary of what was accomplished. Keep it to 2-3 sentences.
 """.strip()
 
 
@@ -48,13 +55,12 @@ Use "unknown" when the command does not map to any supported action.
 
 
 class QueryAgent:
-    """Translates natural language commands into management actions using an LLM.
+    """LLM-powered agent used by AgentManagementLayer.
 
     Args:
-        model:      OpenAI model name (default: ``gpt-4o-mini``).
-        api_key:    OpenAI API key.  Falls back to the ``OPENAI_API_KEY``
-                    environment variable when *None*.
-        base_url:   Optional custom base URL for OpenAI-compatible APIs.
+        model:    OpenAI chat model (default: ``gpt-4o-mini``).
+        api_key:  OpenAI API key. Falls back to ``OPENAI_API_KEY`` env var.
+        base_url: Optional custom base URL for OpenAI-compatible APIs.
     """
 
     def __init__(
@@ -68,56 +74,49 @@ class QueryAgent:
             api_key=api_key or os.getenv("OPENAI_API_KEY"),
             base_url=base_url,
         )
-        self._history: List[Dict[str, str]] = []
 
     # ------------------------------------------------------------------
-    # Public API
+    # Public API called by AgentManagementLayer
     # ------------------------------------------------------------------
 
-    def query(self, user_input: str) -> Dict[str, Any]:
-        """Send *user_input* to the LLM and return a structured action dict.
+    def detect_intent(self, text: str) -> str:
+        """Classify *text* into one of the management system's intents.
 
-        The returned dictionary always contains at least the keys
-        ``action``, ``parameters``, and ``message``.
-
-        Raises:
-            ValueError: If the model returns a response that is not valid JSON.
-            openai.OpenAIError: On API-level errors.
+        Falls back to ``"general_task"`` when the model returns an
+        unrecognised label.
         """
-        self._history.append({"role": "user", "content": user_input})
-
         response = self._client.chat.completions.create(
             model=self.model,
             messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                *self._history,
+                {"role": "system", "content": _INTENT_SYSTEM_PROMPT},
+                {"role": "user", "content": text},
             ],
-            response_format={"type": "json_object"},
+            max_tokens=20,
+            temperature=0,
         )
+        label = (response.choices[0].message.content or "").strip().lower()
+        return label if label in _VALID_INTENTS else "general_task"
 
-        raw = response.choices[0].message.content or "{}"
-        try:
-            result: Dict[str, Any] = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise ValueError(
-                f"LLM returned non-JSON response: {raw!r}"
-            ) from exc
+    def aggregate_results(self, results: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Generate a natural-language summary of *results* using an LLM."""
+        import json
 
-        self._history.append({"role": "assistant", "content": raw})
-        return self._normalise(result)
+        results_json = json.dumps(results, indent=2)
+        response = self._client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": _AGGREGATE_SYSTEM_PROMPT},
+                {"role": "user", "content": results_json},
+            ],
+            max_tokens=200,
+            temperature=0.3,
+        )
+        summary = (response.choices[0].message.content or "").strip()
 
-    def reset(self) -> None:
-        """Clear the conversation history."""
-        self._history.clear()
+        successful = [r for r in results if r.get("status") == "success"]
+        return {
+            "status": "completed",
+            "summary": summary,
+            "details": successful,
+        }
 
-    # ------------------------------------------------------------------
-    # Internals
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _normalise(result: Dict[str, Any]) -> Dict[str, Any]:
-        """Ensure required top-level keys are always present."""
-        result.setdefault("action", "unknown")
-        result.setdefault("parameters", {})
-        result.setdefault("message", "")
-        return result
