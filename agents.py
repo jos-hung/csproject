@@ -35,7 +35,7 @@ class Agent:
     agent_type: str = AgentType.GENERIC.value
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     status: AgentStatus = AgentStatus.CREATED
-    created_at: datetime = field(default_factory=datetime.now)
+    created_at: datetime = field(default_factory=lambda: datetime.now())
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -76,5 +76,5 @@ class AgentRegistry:
         """Look up an agent by ID first, then by name."""
         return self.get(identifier) or self.find_by_name(identifier)
 
-    def all(self) -> list:
+    def all(self) -> list[Agent]:
         return list(self._agents.values())

@@ -106,10 +106,11 @@ class ManagementSystem:
 
     def list_agents(self) -> Dict[str, Any]:
         """Return all registered agents."""
+        all_agents = self._registry.all()
         return {
             "status": "success",
-            "agents": [a.to_dict() for a in self._registry.all()],
-            "count": len(self._registry.all()),
+            "agents": [a.to_dict() for a in all_agents],
+            "count": len(all_agents),
         }
 
     def get_status(self, identifier: str) -> Dict[str, Any]:
