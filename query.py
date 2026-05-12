@@ -43,7 +43,7 @@ Respond with ONLY the intent label, nothing else.
 """.strip()
 
 _AGGREGATE_SYSTEM_PROMPT = """
-You are an assistant that summarises the results of a multi-agent workflow.
+You are an assistant that summarizes the results of a multi-agent workflow.
 Given a JSON list of task results, write a concise, friendly human-readable
 summary of what was accomplished. Keep it to 2-3 sentences.
 """.strip()
